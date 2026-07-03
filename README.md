@@ -4,8 +4,6 @@ Scoped, delegatable, revocable, auditable capability tokens for AI agents.
 
 Built against a real, current gap: OAuth/RBAC/ABAC assume a human clicking "allow" once. Agents delegate tasks to other agents, recursively, across tool calls — and as of a May 2026 paper, *"no deployed protocol can cryptographically prove which human principal authorized which specific agent to perform which specific action at the third or fourth hop of a delegation chain."* A 2026 scan of ~2,000 live MCP servers found all of them lacked authentication entirely.
 
-This maps directly to YC's Summer 2026 "Software for Agents" category: identity, permissions, and machine-native authorization for a world where the next trillion users are agents, not people.
-
 ## Why not just OAuth?
 
 OAuth scopes are static and operator-granted once. Agent delegation needs three things OAuth doesn't have:
