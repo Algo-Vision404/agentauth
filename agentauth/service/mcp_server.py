@@ -1,67 +1,150 @@
 """
-A real MCP server (usable by any MCP client -- Claude Desktop, etc.) whose
-tools are enforced by agentauth capability tokens. Every tool call requires
-a `token` argument (a serialized Capability JSON string) which is verified
-BEFORE the tool's business logic runs.
+mcp_server.py -- a real MCP server (mcp.server.fastmcp.FastMCP) exposing four
+token-enforced tools, each verified BEFORE the tool body runs: the exact boundary
+a 2026 scan found ~2,000 live MCP servers leave completely unauthenticated.
 
-Run standalone (stdio transport, for use with an MCP client config):
-    python -m agentauth.service.mcp_server
+    python -m agentauth.service.mcp_server     # stdio transport
 
-The demo (examples/demo_mcp_server.py) drives this in-process instead,
-which is easier to run in a sandbox without wiring up a real MCP client.
+Any tool call now requires a valid, scoped token:
+
+    get_order(token=token_json, order_id="42")
+    # -> {"allowed": false, "layer": "caveat", "reason": "..."} if the token
+    #    doesn't authorize it, otherwise the actual tool result
+
+Changed in 1.1.0: four tools instead of two, server-side policies are attached
+per tool (see mcp_tools.TOOL_REGISTRY), every tool accepts discharge tokens, and
+there is a `who_authorized` tool for provenance questions. Importing this module
+without `mcp` installed still works -- only create_server() raises.
 """
 
 from __future__ import annotations
 
-from mcp.server.fastmcp import FastMCP
+import json
+import os
+from typing import Any, Optional
 
 from ..audit import AuditLog
 from ..issuer import Issuer
 from ..ledger import RevocationLedger
 from ..verifier import Verifier
-from .mcp_tools import ToolAuthError, get_order_impl, update_order_impl
+from .mcp_tools import TOOL_REGISTRY, call_tool, tool_catalogue
 
-mcp = FastMCP("agentauth-protected-orders")
+try:  # optional dependency: the library and tests work without it
+    from mcp.server.fastmcp import FastMCP  # type: ignore
 
-# Module-level shared state for the standalone-server case. A driving
-# script that wants to mint/verify against the SAME state (as the demo
-# does) should call `configure()` with its own Issuer/Verifier instead of
-# relying on this default -- see examples/demo_mcp_server.py.
-_issuer = Issuer()
-_issuer.register_principal("alice")
-_ledger = RevocationLedger()
-_audit_log = AuditLog()
-_verifier = Verifier(_issuer, ledger=_ledger, audit_log=_audit_log)
+    MCP_AVAILABLE = True
+except Exception:  # pragma: no cover - exercised only when mcp is missing
+    FastMCP = None  # type: ignore
+    MCP_AVAILABLE = False
 
 
-def configure(issuer: Issuer, ledger: RevocationLedger, audit_log: AuditLog) -> None:
-    """Point this MCP server at externally-created state, so a driving
-    script can mint tokens with the same Issuer this server verifies
-    against. Must be called before any tool invocation."""
-    global _issuer, _ledger, _audit_log, _verifier
-    _issuer, _ledger, _audit_log = issuer, ledger, audit_log
-    _verifier = Verifier(issuer, ledger=ledger, audit_log=audit_log)
+def service_verifier() -> Verifier:
+    """Verifier wired the way the HTTP service wires it (env-configurable paths)."""
+    issuer = Issuer()
+    ledger = RevocationLedger(os.environ.get("AGENTAUTH_LEDGER_DB", "agentauth-ledger.db"))
+    audit = AuditLog(os.environ.get("AGENTAUTH_AUDIT_DB", "agentauth-audit.db"))
+    return Verifier(issuer, ledger, audit)
 
 
-@mcp.tool()
-def get_order(token: str, order_id: str) -> dict:
-    """Read an order by id. Requires a capability token authorizing
-    action='read' on resource='orders/{order_id}'."""
-    try:
-        return get_order_impl(_verifier, token, order_id)
-    except ToolAuthError as e:
-        return {"error": f"authorization denied: {e.reason}"}
+def create_server(verifier: Optional[Verifier] = None) -> Any:
+    """Build the FastMCP server. Raises RuntimeError if the mcp package is absent."""
+    if not MCP_AVAILABLE:
+        raise RuntimeError(
+            "the 'mcp' package is not installed; run `pip install mcp` to serve tools over MCP"
+        )
+
+    verifier = verifier or service_verifier()
+    mcp = FastMCP("agentauth-mcp")
+
+    def _run(name: str, token: str, arguments: dict, discharges: Optional[list] = None,
+             workflow_id: Optional[str] = None) -> dict:
+        return call_tool(
+            verifier, name, token, arguments, discharges=discharges, workflow_id=workflow_id
+        )
+
+    def _discharges(raw: Optional[str]) -> Optional[list]:
+        if not raw:
+            return None
+        parsed = json.loads(raw)
+        return parsed if isinstance(parsed, list) else [parsed]
+
+    @mcp.tool()
+    def get_order(token: str, order_id: str, discharges: Optional[str] = None) -> dict:
+        """Read one order. Requires a token allowing 'read' on orders/{order_id}."""
+        return _run("get_order", token, {"order_id": order_id}, _discharges(discharges))
+
+    @mcp.tool()
+    def update_order(
+        token: str,
+        order_id: str,
+        status: str,
+        approval_id: Optional[str] = None,
+        discharges: Optional[str] = None,
+    ) -> dict:
+        """Update an order's status. Requires 'write' plus the tool's own policy."""
+        arguments: dict[str, Any] = {"order_id": order_id, "status": status}
+        if approval_id:
+            arguments["approval_id"] = approval_id
+        return _run("update_order", token, arguments, _discharges(discharges))
+
+    @mcp.tool()
+    def get_customer_insights(
+        token: str,
+        customer_id: str,
+        workflow_id: Optional[str] = None,
+        discharges: Optional[str] = None,
+    ) -> dict:
+        """Aggregate one customer's history. Counts toward the token's aggregation budget."""
+        return _run(
+            "get_customer_insights",
+            token,
+            {"customer_id": customer_id},
+            _discharges(discharges),
+            workflow_id=workflow_id,
+        )
+
+    @mcp.tool()
+    def search_orders(
+        token: str,
+        status: Optional[str] = None,
+        limit: int = 10,
+        discharges: Optional[str] = None,
+    ) -> dict:
+        """Search orders. Requires 'read' on orders/* and limit between 1 and 100."""
+        arguments: dict[str, Any] = {"limit": limit}
+        if status:
+            arguments["status"] = status
+        return _run("search_orders", token, arguments, _discharges(discharges))
+
+    @mcp.tool()
+    def who_authorized(token_id: str) -> dict:
+        """Provenance: which principal authorized which agent, hop by hop (from the audit log)."""
+        return {
+            "token_id": token_id,
+            "path": verifier.audit_log.who_authorized(token_id),
+            "decisions": [
+                {"event": r.event, "allowed": r.allowed, "layer": r.layer, "reason": r.reason}
+                for r in verifier.audit_log.trace(token_id)[-10:]
+            ],
+        }
+
+    @mcp.tool()
+    def list_tools_catalogue() -> list[dict]:
+        """The tools this server exposes, with their required action/resource and policy."""
+        return tool_catalogue()
+
+    return mcp
 
 
-@mcp.tool()
-def update_order(token: str, order_id: str, status: str) -> dict:
-    """Update an order's status. Requires a capability token authorizing
-    action='write' on resource='orders/{order_id}'."""
-    try:
-        return update_order_impl(_verifier, token, order_id, status)
-    except ToolAuthError as e:
-        return {"error": f"authorization denied: {e.reason}"}
-
-
-if __name__ == "__main__":
+def main() -> None:  # pragma: no cover - entry point
+    mcp = create_server()
     mcp.run()
+
+
+if __name__ == "__main__":  # pragma: no cover
+    main()
+
+
+def tool_names() -> list[str]:
+    """Registered tools, importable without the mcp package."""
+    return list(TOOL_REGISTRY)

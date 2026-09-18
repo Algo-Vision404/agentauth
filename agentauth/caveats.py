@@ -5,7 +5,17 @@ them -- that invariant is what makes attenuation safe, and it's enforced
 by the HMAC chain in token.py, not by these classes themselves.
 
 Each caveat serializes to a small dict (so it can be hashed into the HMAC
-chain deterministically) and implements check(context, ledger) -> (bool, str).
+chain deterministically) and implements check(context, ledger, token_id) ->
+(bool, str).
+
+Kinds:
+  action            which verbs are allowed
+  resource          which resource globs are reachable
+  time_window       wall-clock validity
+  max_uses          execution-count cap (ledger-backed, not wall-clock)
+  agg_budget        anti-inference cap on DISTINCT units per workflow
+  claim             NEW in 1.1.0: context must carry a claim value from a set
+  third_party       NEW in 1.1.0: only a discharge from another service passes
 """
 
 from __future__ import annotations
@@ -27,8 +37,10 @@ class Caveat:
 
     @staticmethod
     def from_dict(d: dict) -> "Caveat":
-        kind = d["kind"]
-        cls = _REGISTRY[kind]
+        kind = d.get("kind")
+        cls = _REGISTRY.get(kind)
+        if cls is None:
+            raise ValueError(f"unknown caveat kind: {kind!r}")
         return cls._from_dict(d)
 
 
@@ -62,6 +74,8 @@ class ResourceCaveat(Caveat):
     additionally re-checks the resource against every caveat in the chain,
     so a widened pattern later in the chain doesn't help an attacker
     without knowing the root secret to forge a passing HMAC.
+
+    Patterns inside one caveat are OR-ed; separate caveats are AND-ed.
     """
     allowed_patterns: tuple[str, ...]
     kind: str = field(default="resource", init=False)
@@ -172,10 +186,87 @@ class AggregationBudgetCaveat(Caveat):
         return AggregationBudgetCaveat(d["budget_name"], d["max_units"], d["unit_field"])
 
 
+@dataclass
+class ClaimCaveat(Caveat):
+    """
+    NEW in 1.1.0. Requires the *call context* to carry an expected claim value,
+    e.g. claim_field="on_behalf_of", allowed_values=("alice",). This is how a
+    token can say "only when acting for alice", which is the piece classical
+    scopes have no way to express. Also used to constrain discharges.
+    """
+    claim_field: str
+    allowed_values: tuple[str, ...]
+    kind: str = field(default="claim", init=False)
+
+    def to_dict(self) -> dict:
+        return {"kind": self.kind, "claim_field": self.claim_field, "allowed_values": list(self.allowed_values)}
+
+    def check(self, context, ledger, token_id):
+        actual = context.get(self.claim_field)
+        if actual is None:
+            return False, f"claim '{self.claim_field}' missing from call context"
+        if str(actual) in {str(v) for v in self.allowed_values}:
+            return True, ""
+        return False, (
+            f"claim '{self.claim_field}' = {actual!r} not in {tuple(str(v) for v in self.allowed_values)}"
+        )
+
+    @staticmethod
+    def _from_dict(d):
+        return ClaimCaveat(d["claim_field"], tuple(d["allowed_values"]))
+
+
+@dataclass
+class ThirdPartyCaveat(Caveat):
+    """
+    NEW in 1.1.0 -- macaroons' actual killer feature, previously listed as a
+    gap. The caveat names an external `location` (a discharge service) plus a
+    predicate only that service can attest. It cannot be satisfied locally: the
+    verifier accepts a discharge token minted by that service for THIS token
+    (see agentauth.discharge), whose key is
+
+        HMAC(service_root_key, f"{parent_token_id}:{nonce}")
+
+    so a discharge is bound to one token and one caveat instance and cannot be
+    replayed onto a different token or caveat.
+    """
+    location: str
+    predicate: str
+    nonce: str
+    kind: str = field(default="third_party", init=False)
+
+    def to_dict(self) -> dict:
+        return {"kind": self.kind, "location": self.location, "predicate": self.predicate, "nonce": self.nonce}
+
+    def check(self, context, ledger, token_id):
+        satisfied = context.get("_discharged_nonces") or set()
+        if self.nonce in satisfied:
+            return True, ""
+        return False, (
+            f"third-party caveat requires a discharge from '{self.location}' "
+            f"(predicate: {self.predicate})"
+        )
+
+    @staticmethod
+    def _from_dict(d):
+        return ThirdPartyCaveat(d["location"], d.get("predicate", ""), d["nonce"])
+
+
 _REGISTRY = {
     "action": ActionCaveat,
     "resource": ResourceCaveat,
     "time_window": TimeWindowCaveat,
     "max_uses": MaxUsesCaveat,
     "agg_budget": AggregationBudgetCaveat,
+    "claim": ClaimCaveat,
+    "third_party": ThirdPartyCaveat,
 }
+
+
+def from_dict(d: dict) -> Caveat:
+    """Module-level alias for Caveat.from_dict (nicer import ergonomics)."""
+    return Caveat.from_dict(d)
+
+
+def kinds() -> list[str]:
+    return sorted(_REGISTRY)

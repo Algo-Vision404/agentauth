@@ -1,0 +1,32 @@
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "agentauth"
+version = "1.1.0"
+description = "Scoped, delegatable, revocable, auditable capability tokens for AI agents, with MCP tool enforcement"
+readme = "README.md"
+requires-python = ">=3.10"
+dependencies = []
+
+[project.optional-dependencies]
+service = ["fastapi>=0.110", "uvicorn[standard]>=0.27", "pydantic>=2.5", "httpx>=0.27"]
+mcp = ["mcp>=1.2"]
+dev = [
+    "pytest>=8.0",
+    "fastapi>=0.110",
+    "uvicorn[standard]>=0.27",
+    "pydantic>=2.5",
+    "httpx>=0.27",
+]
+
+[project.scripts]
+agentauth-service = "agentauth.service.api:create_app"
+
+[tool.setuptools]
+packages = ["agentauth", "agentauth.service"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "-q"

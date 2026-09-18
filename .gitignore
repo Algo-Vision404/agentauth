@@ -1,9 +1,29 @@
+# --- agentauth runtime state (added with the 1.1.0 changes) -----------------
+# The ledger and audit log are SQLite files by default (AGENTAUTH_LEDGER_DB /
+# AGENTAUTH_AUDIT_DB). They hold live revocation and use-count state, so they
+# must never be committed.
+*.db
+*.db-wal
+*.db-shm
+
+# --- Python ----------------------------------------------------------------
 __pycache__/
 *.py[cod]
-*$py.class
 .pytest_cache/
-*.db
-*.sqlite
-*.sqlite3
-.coverage
-htmlcov/
+.venv/
+venv/
+build/
+dist/
+*.egg-info/
+
+# --- secrets / local config -------------------------------------------------
+.env
+.env.local
+
+# --- sandbox scaffolding only (the Next.js template this was edited in) -----
+# Not part of the agentauth package; safe to delete when copying the Python
+# changes into a clean clone.
+node_modules/
+.next/
+*.tsbuildinfo
+out/
