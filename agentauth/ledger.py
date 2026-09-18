@@ -157,7 +157,7 @@ class RevocationLedger:
         return row[0] if row else 0
 
     def record_aggregation_use(self, workflow_id: str, budget_name: str, unit_value: Any) -> None:
-        with self._conn.execute("SELECT 1") and self._conn:
+        with self._conn:
             self._conn.execute(
                 "INSERT OR IGNORE INTO agg_seen (workflow_id, budget_name, unit_value) VALUES (?, ?, ?)",
                 (workflow_id, budget_name, str(unit_value))

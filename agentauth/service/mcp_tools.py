@@ -435,7 +435,7 @@ def tool_catalogue(policies: Optional[dict[str, Any]] = None) -> list[dict]:
         properties = dict(spec.parameters)
         properties["token"] = {
             "type": "string",
-            "description": "AgentAuth capability token (JSON or agenttauth1_... compact form). Required.",
+            "description": "AgentAuth capability token (JSON or agentauth1_... compact form). Required.",
         }
         properties["workflow_id"] = {
             "type": "string",

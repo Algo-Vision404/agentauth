@@ -33,9 +33,15 @@ try:  # optional dependency: the library and tests work without it
     from mcp.server.fastmcp import FastMCP  # type: ignore
 
     MCP_AVAILABLE = True
-except Exception:  # pragma: no cover - exercised only when mcp is missing
+    _MCP_IMPORT_ERROR: Optional[str] = None
+except Exception as exc:  # pragma: no cover - exercised only when mcp is missing/incompatible
     FastMCP = None  # type: ignore
     MCP_AVAILABLE = False
+    # Distinguish "not installed at all" from "installed but incompatible" (e.g. the
+    # mcp 2.x rename of FastMCP -> MCPServer): the two need different fixes, and
+    # telling someone to `pip install mcp` when it's already installed just wastes
+    # their time debugging the wrong problem.
+    _MCP_IMPORT_ERROR = str(exc)
 
 
 def service_verifier() -> Verifier:
@@ -49,8 +55,22 @@ def service_verifier() -> Verifier:
 def create_server(verifier: Optional[Verifier] = None) -> Any:
     """Build the FastMCP server. Raises RuntimeError if the mcp package is absent."""
     if not MCP_AVAILABLE:
+        try:
+            import importlib.metadata as _metadata
+
+            installed_version = _metadata.version("mcp")
+        except Exception:
+            installed_version = None
+
+        if installed_version is not None:
+            raise RuntimeError(
+                f"the 'mcp' package is installed (version {installed_version}) but could not be "
+                f"imported as expected: {_MCP_IMPORT_ERROR}. agentauth targets the mcp 1.x API "
+                f"(FastMCP); if this is mcp 2.x, run `pip install \"mcp>=1.2,<2\"` to install a "
+                f"compatible version."
+            )
         raise RuntimeError(
-            "the 'mcp' package is not installed; run `pip install mcp` to serve tools over MCP"
+            "the 'mcp' package is not installed; run `pip install \"mcp>=1.2,<2\"` to serve tools over MCP"
         )
 
     verifier = verifier or service_verifier()

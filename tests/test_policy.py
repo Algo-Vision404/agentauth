@@ -112,3 +112,23 @@ def test_policy_from_file_round_trips(tmp_path):
 def test_invalid_ast_from_client_is_rejected_not_ignored():
     with pytest.raises(PolicyError):
         Policy.from_dict({"op": "and", "args": [{"op": "eval", "field": "__import__"}]})
+
+
+def test_multi_arg_not_renders_the_expression_it_actually_evaluates():
+    """Regression: eval_ast computes NOT(A OR B OR ...) for a multi-arg 'not'
+    (De Morgan: NOT(A OR B) == NOT A AND NOT B), so the human-readable render
+    must say OR, not AND -- otherwise a denial reason tells the reader the
+    opposite of the rule that was actually applied."""
+    policy = Policy.from_dict({"op": "not", "args": [
+        {"op": "eq", "field": "status", "value": "pending"},
+        {"op": "eq", "field": "status", "value": "shipped"},
+    ]})
+    assert policy.render() == 'NOT (status EQ "pending" OR status EQ "shipped")'
+
+    # status="pending" satisfies the first branch of the OR, so NOT(OR) is False
+    allowed, reason = policy.evaluate({"status": "pending"})
+    assert allowed is False
+    assert "OR" in reason  # the printed rule must match what was actually checked
+
+    # status outside both branches: OR is False, so NOT(OR) is True
+    assert policy.allows({"status": "delivered"}) is True

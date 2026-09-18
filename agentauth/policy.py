@@ -141,7 +141,7 @@ def render_ast(node: dict) -> str:
     if op == "or":
         return "(" + " OR ".join(render_ast(c) for c in node["args"]) + ")"
     if op == "not":
-        return "NOT (" + " AND ".join(render_ast(c) for c in node["args"]) + ")"
+        return "NOT (" + " OR ".join(render_ast(c) for c in node["args"]) + ")"
     if op == "exists":
         return f"{node['field']} IS PRESENT"
     if op in {"in", "nin"}:
